@@ -1,0 +1,84 @@
+#### Wage regressions ####
+
+# Generate log wage, the dependent variable in the regression and age-squared
+wage_reg <- wage_master %>%
+  mutate(lnwage = log(wage),
+         age2 = age^2)
+
+## Wage regression function: functionalize wage regression cross-cuts
+wage_reg_fun <- function(data, demog) {
+  
+  # ensure data is ungrouped
+  data <- ungroup(data)
+  
+  ## demogaphic restrictions
+  # overall
+  if (demog == "all") {
+    # define regression FE variables for overall
+    regress_vars <- c("age", "age2", "i(educ, ref = '_e-hs')", "i(division)", "i(wbho, ref = '_r-white')", "i(female, ref = '_g-male')")
+    
+    df <- data %>% 
+      mutate(all = "") %>% 
+      nest_by(year, all)
+  }
+  
+  # race/ethnicity
+  #note: regression by wbho looks at MF wage-gap
+  if (demog == "wbho") {
+    # define regression FE variableby race/ethnicity
+    regress_vars <- c("age", "age2", "i(educ, ref = '_e-hs')", "i(division)", "i(female, ref = '_g-male')")
+    
+    
+    df <- data  %>% 
+      filter(wbho %in% c("_r-white", "_r-black", "_r-hisp")) %>% 
+      nest_by(year, wbho)
+  }
+  
+  # sex
+  if (demog == "female") {
+    # define regression FE variables by gender
+    regress_vars <- c("age", "age2", "i(educ, ref = '_e-hs')", "i(division)", "i(wbho, ref = '_r-white')")
+    
+    
+    df <- data %>% 
+      #mutate(female = case_when(
+      nest_by(year, female)
+  }
+  
+  # return null if demographic outside scope of function
+  out <- NULL
+  
+  ## final output
+  out <- df %>% 
+    # define regression model
+    #note: regress on log wages
+    mutate(model = list(feols(
+      fml = as.formula(paste("lnwage ~ ", paste(regress_vars, collapse = " + "))), 
+      data = data, 
+      weights = ~ wgt))) %>% 
+    ungroup() %>%
+    # apply tidier across nested groups to extract regression information
+    mutate(model_results = map(model, broom::tidy)) %>%
+    select(-data, -model) %>%
+    # flatten data for readability
+    unnest(model_results) %>% 
+    # reshape wide by demographic
+    mutate(wagegap_type = case_when(
+      term == "wbho::_r-black" ~ "wagegap-bw",
+      term == "educ::_e-coll" ~ "wagegap-coll",
+      term == "educ::_e-lths" ~ "wagegap-hs",
+      term == "wbho::_r-hisp" ~ "wagegap-hw",
+      term == "female::_g-female" ~ "wagegap-mf")) %>% filter(!is.na(wagegap_type)) %>% 
+    pivot_wider(id_cols = year, names_from = c(wagegap_type, all_of(demog)), values_from = estimate, names_sep = "") 
+
+  
+  return(out)
+  
+}
+
+# map regression based wage gap overall and by gender and race/ethnicity 
+wage_reg <- map(c("all", "wbho", "female"), ~ wage_reg_fun(wage_master %>% filter(year > 1978), demog = .x)) %>% 
+  # flatten list by merging on year
+  reduce(function(df1, df2) full_join(df1, df2, by = "year")) %>% 
+  rename_with(~ paste0(.x, "_m-regression"), -contains("year")) %>% 
+  mutate(across(-c(year), ~ abs(.x)))
